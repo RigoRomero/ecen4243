@@ -3,44 +3,56 @@
 
 rvtest_entry_point:
 
-    # set up PMP so all of memory is accessible and we don't trap when entering supervisor mode
-    # Define region 0 to cover all addresses as RWX
-    nop
+    # --- Set up PMP to allow RWX access ---
+    li t0, 0x3f              # TOR, R, W, X permissions
+    csrw pmpcfg0, t0
 
-    # switch to supervisor mode	
-    # Set mstatus.MPP to 01, set MPEC to a trampoline address where supervisor should begin, do mret
-    
-				# fill in instructions here			
-    mret                    	# enter supervisor mode at supervisorstart
+    li t0, -1                # PMP address range: 0xFFFFFFFF
+    csrw pmpaddr0, t0
+
+    # --- Switch to Supervisor Mode ---
+    csrr t0, mstatus
+    li t1, ~(3 << 11)        # Clear MPP bits
+    and t0, t0, t1
+    li t1, (1 << 11)         # Set MPP = 01 (Supervisor)
+    or t0, t0, t1
+    csrw mstatus, t0
+
+    la t0, supervisorstart   # Load address of supervisorstart
+    csrw mepc, t0
+
+    mret                     # Enter supervisor mode
     nop
 
 supervisorstart:
-    la t0, pagetable        	# get address of root page table
-				# fill in instructions here 
-    csrw satp, t0         	# enable virtual memory
-    
-    # now we are execuiting on virtual page 0x80000, which is also physical page 0x80000
-    # (this can be whatever you want as long as you use the correct address defined in the proj)	
-    li t0, 0x90000300       
+    # --- Set up Page Table ---
+    la t0, pagetable
+    srli t0, t0, 12           # Shift page table address for satp
+    li t1, (1 << 31)          # MODE=1 for Sv32
+    or t0, t0, t1
+    csrw satp, t0             # Write to satp
+    sfence.vma                # Flush TLB
+
+    # --- Now running under Virtual Memory ---
+    li t0, 0x90000300         # Virtual address
     li t1, 42
-    sw t1, 0(t0)
+    sw t1, 0(t0)              # Store 42 at 0x90000300
 
-
-    la t0, testcode         # address of a routine to run
-    lui t1, 0x10000         
-    add t0, t0, t1          # address of testcode on virtual page 0x90000 
-    jr t0                   # jump to the testcode on Virtual page 0x90000, 
-                            #   which still points to same code on physical page 0x80000
-    nop                     # shouldn't be executed
+    # --- Jump to Testcode ---
+    la t0, testcode
+    lui t1, 0x10000
+    add t0, t0, t1            # Virtual address offset
+    jr t0                    # Jump to testcode
+    nop                      # Should never execute
 
 testcode:
-    li t0, 42                # do something
+    li t0, 42                # Do something simple
 
 write_tohost:
-    la s1, tohost           # terminate with write tohost
-    li t0, 1                # 1 for success, 3 for failure
-    sw t0, 0(s1)            # send success code (yay)
-    sw zero, 4(s1)          # not obvious why Sail isn't terminating unless this write is done
+    la s1, tohost
+    li t0, 1                 # Success code
+    sw t0, 0(s1)
+    sw zero, 4(s1)
 
 self_loop:
     j self_loop
@@ -49,12 +61,22 @@ tohost:
     .word 0
 
 .data
-
-
 .align 16
-# root (L1) Page table situated at 0x80010000
+
+# --- Root Page Table (Level 1) ---
 pagetable:
+    .word 0x80011 | 0x1      # 0x80011000 >> 12 = 0x80011, valid=1
 
 .align 12
-# L0 page table situated at 0x80011000
 
+# --- Second Level Page Table (Level 0) ---
+secondleveltable:
+    .space 2048              # Reserve space for 512 entries
+
+    # VPN1 = 0x200 (for 0x80000000)
+    .org secondleveltable + (512 * 4)
+    .word 0x80000 | 0xFF     # PPN=0x80000 | flags RWXADG
+
+    # VPN1 = 0x240 (for 0x90000000)
+    .org secondleveltable + (576 * 4)
+    .word 0x80000 | 0xFF     # Map to same 0x80000 physical page
