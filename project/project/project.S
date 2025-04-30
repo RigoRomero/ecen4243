@@ -1,5 +1,4 @@
 .section .text.init
-.org 0x80000000
 .globl rvtest_entry_point
 
 
