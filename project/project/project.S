@@ -1,58 +1,53 @@
 .section .text.init
 .globl rvtest_entry_point
 
-
 rvtest_entry_point:
-
-    # --- Setup PMP to allow RWX access ---
-    li t0, 0x3F
-    csrw pmpcfg0, t0
+    # set up PMP so all of memory is accessible and we don't trap when entering supervisor mode
     li t0, -1
-    csrw pmpaddr0, t0
+    csrw pmpaddr0, t0          # Set pmpaddr0 to all 1s
+    li t0, 0x0F
+    csrw pmpcfg0, t0          # Set pmpcfg0 to RWX for region 0
+    nop
 
-    # --- Set mstatus.MPP = 01 (Supervisor mode) ---
-    csrr t0, mstatus
-    li t1, 0xFFFFE7FF        # Clear bits 12:11 (MPP field)
-    and t0, t0, t1
-    li t1, 0x00000800        # Set MPP = 01
-    or t0, t0, t1
-    csrw mstatus, t0
-
-    # --- Set mepc to 0x90000000 (virtual address of testcode) ---
-    li t0, 0x90000000
-    csrw mepc, t0
-
-    mret                    # Enter Supervisor mode
+    # switch to supervisor mode    
+    csrr t0, mstatus        # Read mstatus
+    li t1, 0x1800         
+    not t2, t1
+    and t0, t0, t2         
+    li t1, 0x800         
+    or t0, t0, t1         
+    csrw mstatus, t0       
+    la t0, supervisorstart  
+    csrw mepc, t0           
+    mret                    # enter supervisor mode at supervisorstart
+    nop
 
 supervisorstart:
-    # --- Setup Page Table (Sv32) ---
-    la t0, pagetable
-    li t1, 4096
-    divu t0, t0, t1          # t0 = pagetable >> 12
-    li t1, 0x80000000        # Set MODE=1 (Sv32) in satp
-    or t0, t0, t1
-    csrw satp, t0
-    sfence.vma
-
-    # --- Store 42 to virtual address 0x90000300 ---
-    li t0, 0x90000300
+    la t0, pagetable        # get address of root page table
+    srli t1, t0, 12         
+    li t2, 8               
+    slli t2, t2, 31        
+    or t1, t1, t2         
+    mv t0, t1               
+    csrw satp, t0           # enable virtual memory
+    
+    li t0, 0x90000300       
     li t1, 42
     sw t1, 0(t0)
 
-    # --- Jump to testcode at virtual address 0x90000000 ---
-    li t0, 0x90000000
-    jr t0
-    nop
+    la t0, testcode         # address of a routine to run
+    lui t1, 0x10000         
+    add t0, t0, t1          # address of testcode on virtual page 0x90000 
+    jr t0                   # jump to the testcode on Virtual page 0x90000
 
-# --- This code is mapped at 0x90000000 virtually, but 0x80000000 physically ---
 testcode:
-    li t0, 42                # Arbitrary test instruction
+    li t0, 42               # do something
 
 write_tohost:
-    la s1, tohost
-    li t0, 1
-    sw t0, 0(s1)
-    sw zero, 4(s1)
+    la s1, tohost           # terminate with write tohost
+    li t0, 1                # 1 for success, 3 for failure
+    sw t0, 0(s1)            # send success code (yay)
+    sw zero, 4(s1)          # not obvious why Sail isn't terminating unless this write is done
 
 self_loop:
     j self_loop
@@ -60,25 +55,11 @@ self_loop:
 tohost:
     .word 0
 
-# --------------------------
-# Data section
-# --------------------------
 .data
-.align 12
 
-# --- First-level Page Table ---
+.align 16
+# root (L1) Page table situated at 0x80010000
 pagetable:
-    .word 0x80001 | 0x1
-  # VPN1=0 → addr of second level table (valid)
 
 .align 12
-secondleveltable:
-    .space 2048                          # 512 words (2048 bytes) = second-level page table
-
-    # VPN1 = 0x200 → maps 0x80000000 → 0x80000000 (PPN = 0x80000)
-    .org secondleveltable + (512 * 4)
-    .word 0x80000 | 0xFF                 # RWXADGV permissions
-
-    # VPN1 = 0x240 → maps 0x90000000 → 0x80000000 (same PPN)
-    .org secondleveltable + (576 * 4)
-    .word 0x80000 | 0xFF                 # Same mapping for aliasing
+# L0 page table situated at 0x80011000
