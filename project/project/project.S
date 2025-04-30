@@ -1,56 +1,57 @@
 .section .text.init
+.org 0x80000000
 .globl rvtest_entry_point
+
 
 rvtest_entry_point:
 
-    # --- Set up PMP to allow RWX access ---
-    li t0, 0x3f              # TOR, R, W, X permissions
+    # --- Setup PMP to allow RWX access ---
+    li t0, 0x3F
     csrw pmpcfg0, t0
-
-    li t0, -1                # PMP address range: 0xFFFFFFFF
+    li t0, -1
     csrw pmpaddr0, t0
 
-    # --- Switch to Supervisor Mode ---
+    # --- Set mstatus.MPP = 01 (Supervisor mode) ---
     csrr t0, mstatus
-    li t1, ~(3 << 11)        # Clear MPP bits
+    li t1, 0xFFFFE7FF        # Clear bits 12:11 (MPP field)
     and t0, t0, t1
-    li t1, (1 << 11)         # Set MPP = 01 (Supervisor)
+    li t1, 0x00000800        # Set MPP = 01
     or t0, t0, t1
     csrw mstatus, t0
 
-    la t0, supervisorstart   # Load address of supervisorstart
+    # --- Set mepc to 0x90000000 (virtual address of testcode) ---
+    li t0, 0x90000000
     csrw mepc, t0
 
-    mret                     # Enter supervisor mode
-    nop
+    mret                    # Enter Supervisor mode
 
 supervisorstart:
-    # --- Set up Page Table ---
+    # --- Setup Page Table (Sv32) ---
     la t0, pagetable
-    srli t0, t0, 12           # Shift page table address for satp
-    li t1, (1 << 31)          # MODE=1 for Sv32
+    li t1, 4096
+    divu t0, t0, t1          # t0 = pagetable >> 12
+    li t1, 0x80000000        # Set MODE=1 (Sv32) in satp
     or t0, t0, t1
-    csrw satp, t0             # Write to satp
-    sfence.vma                # Flush TLB
+    csrw satp, t0
+    sfence.vma
 
-    # --- Now running under Virtual Memory ---
-    li t0, 0x90000300         # Virtual address
+    # --- Store 42 to virtual address 0x90000300 ---
+    li t0, 0x90000300
     li t1, 42
-    sw t1, 0(t0)              # Store 42 at 0x90000300
+    sw t1, 0(t0)
 
-    # --- Jump to Testcode ---
-    la t0, testcode
-    lui t1, 0x10000
-    add t0, t0, t1            # Virtual address offset
-    jr t0                    # Jump to testcode
-    nop                      # Should never execute
+    # --- Jump to testcode at virtual address 0x90000000 ---
+    li t0, 0x90000000
+    jr t0
+    nop
 
+# --- This code is mapped at 0x90000000 virtually, but 0x80000000 physically ---
 testcode:
-    li t0, 42                # Do something simple
+    li t0, 42                # Arbitrary test instruction
 
 write_tohost:
     la s1, tohost
-    li t0, 1                 # Success code
+    li t0, 1
     sw t0, 0(s1)
     sw zero, 4(s1)
 
@@ -60,23 +61,25 @@ self_loop:
 tohost:
     .word 0
 
+# --------------------------
+# Data section
+# --------------------------
 .data
-.align 16
-
-# --- Root Page Table (Level 1) ---
-pagetable:
-    .word 0x80011 | 0x1      # 0x80011000 >> 12 = 0x80011, valid=1
-
 .align 12
 
-# --- Second Level Page Table (Level 0) ---
+# --- First-level Page Table ---
+pagetable:
+    .word 0x80001 | 0x1
+  # VPN1=0 → addr of second level table (valid)
+
+.align 12
 secondleveltable:
-    .space 2048              # Reserve space for 512 entries
+    .space 2048                          # 512 words (2048 bytes) = second-level page table
 
-    # VPN1 = 0x200 (for 0x80000000)
+    # VPN1 = 0x200 → maps 0x80000000 → 0x80000000 (PPN = 0x80000)
     .org secondleveltable + (512 * 4)
-    .word 0x80000 | 0xFF     # PPN=0x80000 | flags RWXADG
+    .word 0x80000 | 0xFF                 # RWXADGV permissions
 
-    # VPN1 = 0x240 (for 0x90000000)
+    # VPN1 = 0x240 → maps 0x90000000 → 0x80000000 (same PPN)
     .org secondleveltable + (576 * 4)
-    .word 0x80000 | 0xFF     # Map to same 0x80000 physical page
+    .word 0x80000 | 0xFF                 # Same mapping for aliasing
